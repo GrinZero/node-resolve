@@ -6,6 +6,7 @@ Rust implementation of the [Node.js module resolution algorithm](https://nodejs.
 
 Missing features:
 
+ - [x] cache
  - [ ] async?
  - [ ] maybe more
 

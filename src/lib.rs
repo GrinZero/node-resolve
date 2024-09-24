@@ -9,6 +9,8 @@
 //! // → Ok("/other/path/node_modules/abc/index.js")
 //! ```
 
+use dashmap::DashMap;
+use lazy_static::lazy_static;
 use node_builtins::BUILTINS;
 use serde_json::Value;
 use std::default::Default;
@@ -17,8 +19,11 @@ use std::fmt;
 use std::fs::File;
 use std::io::{Error as IOError, ErrorKind as IOErrorKind};
 use std::path::{Component as PathComponent, Path, PathBuf};
-
 static ROOT: &str = "/";
+
+lazy_static! {
+    static ref CACHE: DashMap<String, Option<PathBuf>> = DashMap::new();
+}
 
 #[derive(Debug)]
 pub enum Error {
@@ -81,7 +86,9 @@ impl fmt::Display for RecoverableError {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {
             RecoverableError::NonObjectPackageJson => write!(f, "package.json is not an object"),
-            RecoverableError::MissingMain => write!(f, "package.json does not contain a \"main\" string"),
+            RecoverableError::MissingMain => {
+                write!(f, "package.json does not contain a \"main\" string")
+            }
         }
     }
 }
@@ -268,7 +275,9 @@ impl Resolver {
         if self.preserve_symlinks {
             Ok(normalize_path(path))
         } else {
-            path.canonicalize().map_err(Error::IOError).map_err(Into::into)
+            path.canonicalize()
+                .map_err(Error::IOError)
+                .map_err(Into::into)
         }
     }
 
@@ -284,7 +293,11 @@ impl Resolver {
         // 2. If X.json is a file, parse X.json to a JavaScript object.
         // 3. If X.node is a file, load X.node as binary addon.
         let mut ext_path = path.to_path_buf();
-        if let Some(file_name) = ext_path.file_name().and_then(|name| name.to_str()).map(String::from) {
+        if let Some(file_name) = ext_path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .map(String::from)
+        {
             for ext in &self.extensions {
                 ext_path.set_file_name(format!("{}{}", file_name, ext));
                 if ext_path.is_file() {
@@ -336,9 +349,7 @@ impl Resolver {
                 self.resolve_as_file(&path)
                     .or_else(|_| self.resolve_as_directory(&path))
             }
-            None => {
-                Err(RecoverableError::MissingMain.into())
-            }
+            None => Err(RecoverableError::MissingMain.into()),
         }
     }
 
@@ -354,10 +365,7 @@ impl Resolver {
             }
         }
 
-        Err(Error::IOError(IOError::new(
-            IOErrorKind::NotFound,
-            "Not Found",
-        )).into())
+        Err(Error::IOError(IOError::new(IOErrorKind::NotFound, "Not Found")).into())
     }
 
     /// Resolve by walking up node_modules folders.
@@ -378,10 +386,7 @@ impl Resolver {
             Some(parent) => self
                 .with_basedir(parent.to_path_buf())
                 .resolve_node_modules(target),
-            None => Err(Error::IOError(IOError::new(
-                IOErrorKind::NotFound,
-                "Not Found",
-            )).into()),
+            None => Err(Error::IOError(IOError::new(IOErrorKind::NotFound, "Not Found")).into()),
         }
     }
 }
@@ -444,9 +449,22 @@ pub fn is_core_module(target: &str) -> bool {
 /// }
 /// ```
 pub fn resolve(target: &str) -> Result<PathBuf, Error> {
-    Resolver::default()
+    let key = target.to_string();
+    if let Some(cached) = CACHE.get(&key) {
+        return Ok(cached.clone().unwrap());
+    }
+
+    let result: Result<PathBuf, Error> = Resolver::default()
         .with_basedir(PathBuf::from("."))
-        .resolve(target)
+        .resolve(target);
+
+    match result {
+        Ok(path) => {
+            CACHE.insert(key, Some(path.clone()));
+            Ok(path)
+        }
+        Err(err) => Err(err),
+    }
 }
 
 /// Resolve a node.js module path relative to `basedir`.
@@ -459,14 +477,27 @@ pub fn resolve(target: &str) -> Result<PathBuf, Error> {
 /// }
 /// ```
 pub fn resolve_from(target: &str, basedir: PathBuf) -> Result<PathBuf, Error> {
-    Resolver::default().with_basedir(basedir).resolve(target)
+    let key = format!("{}|{}", target, basedir.to_str().unwrap());
+    if let Some(cached) = CACHE.get(&key) {
+        return Ok(cached.clone().unwrap());
+    }
+
+    let result: Result<PathBuf, Error> = Resolver::default().with_basedir(basedir).resolve(target);
+
+    match result {
+        Ok(path) => {
+            CACHE.insert(key, Some(path.clone()));
+            Ok(path)
+        }
+        Err(err) => Err(err),
+    }
 }
 
 #[cfg(test)]
 mod tests {
+    use super::*;
     use std::env;
     use std::path::PathBuf;
-    use super::*;
 
     fn fixture(part: &str) -> PathBuf {
         env::current_dir().unwrap().join("fixtures").join(part)
